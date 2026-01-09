@@ -1,4 +1,3 @@
-# model.py
 import math
 import re
 from collections import OrderedDict
@@ -10,61 +9,48 @@ from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 class GPT2PPL:
     """
     Perplexity + Burstiness based AI detector (GPTZero-ish style)
-    Memory-safe version for low-memory hosting.
+    - Algorithm unchanged (PPL/burst/bucket/overall mapping).
+    - Engineering: CPU-only, single-load model, lower overhead.
     """
 
     def __init__(self, model_id="gpt2-medium"):
         self.model_id = model_id
 
-        # ====== performance / memory ======
+        # CPU only: reduce overhead on shared infra
         torch.set_grad_enabled(False)
         torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
 
-        self.model = None
-        self.tokenizer = None
-
-        # GPT2 config
-        self.max_length = 1024  # will be overwritten after model load
-        self.stride = 512
-
-        # filtering
-        self.min_words_per_line = 6
-        self.min_chars_per_line = 30
-        self.invalid_ppl_cutoff = 1e8
-
-        # thresholds
-        self.ai_ppl_th = 80
-        self.likely_ai_ppl_th = 130
-
-        # mapping
-        self.overall_ppl_center = 80.0
-        self.overall_ppl_width = 40.0
-        self.overall_burst_center = 0.55
-        self.overall_burst_width = 0.35
-
-        # weights
-        self.w_ppl = 0.75
-        self.w_burst = 0.10
-        self.w_bucket = 0.15
-
-    # ----------- lazy load -----------
-    def _ensure_loaded(self):
-        if self.model is not None and self.tokenizer is not None:
-            return
-
-        # Load tokenizer first (smaller)
-        self.tokenizer = GPT2TokenizerFast.from_pretrained(self.model_id)
-
-        # Load model ONCE
+        # Load ONCE (your old code loaded twice -> huge RAM)
+        self.tokenizer = GPT2TokenizerFast.from_pretrained(model_id)
         self.model = GPT2LMHeadModel.from_pretrained(
-            self.model_id,
+            model_id,
             low_cpu_mem_usage=True,
         )
         self.model.eval()
 
-        # set max length from model config
-        self.max_length = int(getattr(self.model.config, "n_positions", 1024))
+        self.max_length = self.model.config.n_positions
+        self.stride = 512
+
+        # Filtering
+        self.min_words_per_line = 6
+        self.min_chars_per_line = 30
+        self.invalid_ppl_cutoff = 1e8
+
+        # Thresholds
+        self.ai_ppl_th = 80
+        self.likely_ai_ppl_th = 130
+
+        # Overall mapping
+        self.overall_ppl_center = 80.0
+        self.overall_ppl_width = 40.0
+
+        self.overall_burst_center = 0.55
+        self.overall_burst_width = 0.35
+
+        # Weights
+        self.w_ppl = 0.75
+        self.w_burst = 0.10
+        self.w_bucket = 0.15
 
     @staticmethod
     def _clamp(x, a=0.0, b=1.0):
@@ -110,14 +96,15 @@ class GPT2PPL:
 
     def _overall_ai_score(self, avg_ppl: float, burstiness: float, ai_gen_count: int, likely_ai_count: int, denom: int):
         denom = max(1, denom)
+
         ppl_ai = self._clamp((self.overall_ppl_center - avg_ppl) / self.overall_ppl_width)
         burst_ai = self._clamp((self.overall_burst_center - burstiness) / self.overall_burst_width)
         bucket_ai = self._clamp((ai_gen_count + 0.5 * likely_ai_count) / denom)
-        return self._clamp(self.w_ppl * ppl_ai + self.w_burst * burst_ai + self.w_bucket * bucket_ai)
+
+        ai01 = self._clamp(self.w_ppl * ppl_ai + self.w_burst * burst_ai + self.w_bucket * bucket_ai)
+        return ai01
 
     def __call__(self, sentence: str):
-        self._ensure_loaded()
-
         results = OrderedDict()
 
         total_valid_char = re.findall("[a-zA-Z0-9]+", sentence)
@@ -141,6 +128,7 @@ class GPT2PPL:
                 continue
 
             ppl = self.getPPL(line)
+
             if (not (ppl == ppl)) or ppl == float("inf") or ppl >= self.invalid_ppl_cutoff:
                 continue
 
@@ -181,8 +169,6 @@ class GPT2PPL:
         return results, out
 
     def getPPL(self, sentence: str) -> float:
-        self._ensure_loaded()
-
         encodings = self.tokenizer(sentence, return_tensors="pt")
         seq_len = encodings.input_ids.size(1)
 
@@ -195,7 +181,6 @@ class GPT2PPL:
         for begin_loc in range(0, seq_len, self.stride):
             end_loc = min(begin_loc + self.max_length, seq_len)
             trg_len = end_loc - prev_end_loc
-
             input_ids = encodings.input_ids[:, begin_loc:end_loc]
             target_ids = input_ids.clone()
             target_ids[:, :-trg_len] = -100
@@ -206,12 +191,12 @@ class GPT2PPL:
 
             nlls.append(neg_log_likelihood)
             prev_end_loc = end_loc
-
             if end_loc == seq_len:
                 break
 
         val = torch.exp(torch.stack(nlls).sum() / max(1, end_loc))
         ppl = float(val.item())
+
         if not (ppl == ppl) or ppl == float("inf"):
             return 1e9
         return ppl
