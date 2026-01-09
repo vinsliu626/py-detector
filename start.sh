@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-: "${PORT:=8000}"
+: "${PORT:=7860}"
 
-exec uvicorn server:app --host 0.0.0.0 --port "$PORT" --workers 1
+uvicorn server:app --host 0.0.0.0 --port "$PORT"
