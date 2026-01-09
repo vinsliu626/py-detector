@@ -1,23 +1,25 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-import re
-import os
-import hashlib
-import time
+import re, os, hashlib, time
 from collections import OrderedDict
 
 from model import GPT2PPL
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 先放开，等你稳定再收紧到你的 Vercel 域名
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://ai-multimodel-erhw.vercel.app",  # ✅ 换成你自己的 Vercel 域名
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+detector = GPT2PPL()
 
 class Req(BaseModel):
     text: str
@@ -25,33 +27,21 @@ class Req(BaseModel):
 def word_count(text: str) -> int:
     return len(re.findall(r"\S+", text.strip()))
 
-def normalize_text(text: str) -> str:
-    # 归一化：合并空白，防止同文不同空格导致 hash 不同
-    return re.sub(r"\s+", " ", (text or "").strip())
+def normalize_text(t: str) -> str:
+    # 去掉多余空白，让“同一篇文章复制两次”命中缓存
+    return re.sub(r"\s+", " ", (t or "").strip())
 
-# -------- Lazy model (avoid OOM at boot) --------
-DETECTOR = None
-
-def get_detector():
-    global DETECTOR
-    if DETECTOR is None:
-        # 也可以用环境变量 MODEL_ID 控制
-        model_id = os.getenv("MODEL_ID", "distilgpt2")
-        DETECTOR = GPT2PPL(model_id=model_id)
-    return DETECTOR
-
-# -------- Small LRU cache (same input => same output) --------
-CACHE_MAX = int(os.getenv("CACHE_MAX", "32"))
-CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour
-
-_cache = OrderedDict()  # key -> (ts, payload)
+# ====== small memory cache (LRU + TTL) ======
+CACHE_MAX = 128
+CACHE_TTL_SEC = 60 * 30  # 30分钟
+_cache = OrderedDict()   # key -> (ts, payload)
 
 def cache_get(key: str):
-    item = _cache.get(key)
-    if not item:
+    now = time.time()
+    if key not in _cache:
         return None
-    ts, payload = item
-    if time.time() - ts > CACHE_TTL:
+    ts, payload = _cache[key]
+    if now - ts > CACHE_TTL_SEC:
         _cache.pop(key, None)
         return None
     _cache.move_to_end(key)
@@ -64,29 +54,29 @@ def cache_set(key: str, payload):
         _cache.popitem(last=False)
 
 @app.get("/")
-def health():
+def root():
     return {"ok": True, "service": "py-detector"}
 
 @app.post("/detect")
 def detect(req: Req):
-    text = normalize_text(req.text)
+    text_raw = req.text or ""
+    text = normalize_text(text_raw)
 
     if word_count(text) < 80:
         return {
             "ok": False,
             "error": "Need at least 80 words for stable detection.",
-            "debug": {"word_count": word_count(text), "text_len": len(text), "text_preview": text[:200]},
+            "debug": {"word_count": word_count(text), "text_len": len(text)}
         }
 
-    # hash key
+    # ✅ hash key
     key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    cached = cache_get(key)
+    if cached is not None:
+        return {**cached, "cached": True}
 
-    hit = cache_get(key)
-    if hit is not None:
-        return {"ok": True, "cached": True, "result": hit}
+    result = detector(text)  # (metrics_dict, message)
+    payload = {"ok": True, "result": result}
 
-    detector = get_detector()
-    result = detector(text)  # (metrics, message)
-
-    cache_set(key, result)
-    return {"ok": True, "cached": False, "result": result}
+    cache_set(key, payload)
+    return {**payload, "cached": False}
