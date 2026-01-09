@@ -1,46 +1,43 @@
-from fastapi import FastAPI, Response
+# server.py
+from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-import re
-import hashlib
-import time
+from fastapi import Response
+import re, hashlib, time
 from collections import OrderedDict
 
 from model import GPT2PPL
 
 app = FastAPI()
 
-# ---- CORS ----
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://ai-multimodel-erhw.vercel.app",  # ✅ 你的 Vercel 域名
+        "https://ai-multimodel-erhw.vercel.app",  # ✅ 改成你的 Vercel 域名
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---- detector ----
-# 建议保持 gpt2（能活）；如果还 OOM 就改 distilgpt2
-detector = GPT2PPL(model_id="gpt2")
+# ✅ Use smaller model on Render free
+detector = GPT2PPL(model_id="distilgpt2")
 
-# ---- request model ----
 class Req(BaseModel):
     text: str
 
 def word_count(text: str) -> int:
-    return len(re.findall(r"\S+", (text or "").strip()))
+    return len(re.findall(r"\S+", text.strip()))
 
 def normalize_text(t: str) -> str:
-    # 去掉多余空白，让“同一篇文章复制两次”命中缓存
     return re.sub(r"\s+", " ", (t or "").strip())
 
-# ---- small memory cache (LRU + TTL) ----
-CACHE_MAX = 128
-CACHE_TTL_SEC = 60 * 30  # 30分钟
+# ====== small memory cache (LRU + TTL) ======
+CACHE_MAX = 64           # ✅ free plan memory small
+CACHE_TTL_SEC = 60 * 20  # 20 minutes
 _cache = OrderedDict()   # key -> (ts, payload)
 
 def cache_get(key: str):
@@ -61,7 +58,6 @@ def cache_set(key: str, payload):
     while len(_cache) > CACHE_MAX:
         _cache.popitem(last=False)
 
-# ---- health / port scan friendly ----
 @app.get("/")
 def root():
     return {"ok": True, "service": "py-detector"}
@@ -70,17 +66,15 @@ def root():
 def head_root():
     return Response(status_code=200)
 
-# ---- main endpoint ----
 @app.post("/detect")
 def detect(req: Req):
-    text_raw = req.text or ""
-    text = normalize_text(text_raw)
+    text = normalize_text(req.text)
 
     if word_count(text) < 80:
         return {
             "ok": False,
             "error": "Need at least 80 words for stable detection.",
-            "debug": {"word_count": word_count(text), "text_len": len(text)},
+            "debug": {"word_count": word_count(text), "text_len": len(text)}
         }
 
     key = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -88,8 +82,7 @@ def detect(req: Req):
     if cached is not None:
         return {**cached, "cached": True}
 
-    # result is (metrics_dict, message)
-    result = detector(text)
+    result = detector(text)  # (metrics_dict, message)
     payload = {"ok": True, "result": result}
 
     cache_set(key, payload)
