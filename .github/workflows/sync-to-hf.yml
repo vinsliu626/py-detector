@@ -1,0 +1,25 @@
+name: py-detector
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add space https://YOUR_HF_USERNAME:${HF_TOKEN}@huggingface.co/spaces/YOUR_HF_USERNAME/YOUR_SPACE_NAME
+          git push --force space HEAD:main
