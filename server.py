@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Response
+from fastapi.responses import Response
 import re, hashlib, time
 from collections import OrderedDict
 
@@ -10,21 +10,21 @@ from model import GPT2PPL
 
 app = FastAPI()
 
-# CORS
+# ---- CORS ----
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://ai-multimodel-erhw.vercel.app",  # ✅ 改成你的 Vercel 域名
+        "https://ai-multimodel-erhw.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ Use smaller model on Render free
-detector = GPT2PPL(model_id="distilgpt2")
+# ---- detector ----
+detector = GPT2PPL()  # 默认 gpt2（更省内存）；你要 medium 就在 model.py 里改默认
 
 class Req(BaseModel):
     text: str
@@ -36,16 +36,15 @@ def normalize_text(t: str) -> str:
     return re.sub(r"\s+", " ", (t or "").strip())
 
 # ====== small memory cache (LRU + TTL) ======
-CACHE_MAX = 64           # ✅ free plan memory small
-CACHE_TTL_SEC = 60 * 20  # 20 minutes
+CACHE_MAX = 128
+CACHE_TTL_SEC = 60 * 30  # 30 minutes
 _cache = OrderedDict()   # key -> (ts, payload)
 
 def cache_get(key: str):
     now = time.time()
-    item = _cache.get(key)
-    if not item:
+    if key not in _cache:
         return None
-    ts, payload = item
+    ts, payload = _cache[key]
     if now - ts > CACHE_TTL_SEC:
         _cache.pop(key, None)
         return None
@@ -74,7 +73,7 @@ def detect(req: Req):
         return {
             "ok": False,
             "error": "Need at least 80 words for stable detection.",
-            "debug": {"word_count": word_count(text), "text_len": len(text)}
+            "debug": {"word_count": word_count(text), "text_len": len(text)},
         }
 
     key = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -82,8 +81,8 @@ def detect(req: Req):
     if cached is not None:
         return {**cached, "cached": True}
 
-    result = detector(text)  # (metrics_dict, message)
-    payload = {"ok": True, "result": result}
+    metrics, message = detector(text)
+    payload = {"ok": True, "result": [metrics, message]}
 
     cache_set(key, payload)
     return {**payload, "cached": False}

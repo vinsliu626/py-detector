@@ -13,7 +13,7 @@ class GPT2PPL:
     Memory-safe version for low-memory hosting.
     """
 
-    def __init__(self, model_id="distilgpt2"):
+    def __init__(self, model_id="gpt2-medium"):
         self.model_id = model_id
 
         # ====== performance / memory ======
